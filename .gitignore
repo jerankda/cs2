@@ -1,0 +1,37 @@
+# Build artifacts
+*.obj
+*.exe
+*.log
+*.tlog
+*.pdb
+*.idb
+*.ilk
+
+# User-specific files
+*.user
+*.suo
+*.vcxproj.user
+
+# Visual Studio generated folders
+.vs/
+Debug/
+Release/
+x64/
+ipch/
+*.opensdf
+*.sdf
+
+# VS solution and project cache
+*.VC.db
+*.VC.opendb
+
+# CMake and intermediate
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Misc
+*.lastbuildstate
+*.exe.recipe
+*.pch
