@@ -1,10 +1,14 @@
-#include <windows.h>
+﻿#include <windows.h>
 #include <tlhelp32.h>
 #include <iostream>
 #include <thread>
 #include <vector>
 #include <iomanip>
 #include <cmath>
+#include <cfloat>
+#include <algorithm>
+
+#include "RadarTypes.h"
 
 constexpr uintptr_t dwEntityList = 0x1A020A8;
 constexpr uintptr_t dwLocalPlayerController = 0x1A50AD0;
@@ -12,10 +16,23 @@ constexpr uintptr_t m_hPlayerPawn = 0x824;
 constexpr uintptr_t m_iTeamNum = 0x3E3;
 constexpr uintptr_t m_iHealth = 0x344;
 constexpr uintptr_t m_vOldOrigin = 0x1324;
+constexpr uintptr_t m_angEyeAngles = 0x1438;  // dein Blickwinkel (Yaw)
 
-struct Vector3 {
-    float x, y, z;
-};
+Vector3 g_localPos = {};
+std::vector<Vector3> g_enemyPositions;
+float g_viewYaw = 0.0f;
+
+float Distance(const Vector3& a, const Vector3& b) {
+    return std::sqrt((a.x - b.x) * (a.x - b.x) +
+        (a.y - b.y) * (a.y - b.y) +
+        (a.z - b.z) * (a.z - b.z));
+}
+
+int MapDistanceToIntensity(float dist, float minDist = 100.0f, float maxDist = 2000.0f) {
+    if (dist <= minDist) return 100;
+    if (dist >= maxDist) return 0;
+    return static_cast<int>(100 * (1.0f - (dist - minDist) / (maxDist - minDist)));
+}
 
 DWORD GetProcessIdByName(const wchar_t* processName) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -63,27 +80,29 @@ bool IsValidPosition(const Vector3& pos) {
         !(pos.x == 0.0f && pos.y == 0.0f && pos.z == 0.0f);
 }
 
+void RunRadarWindow(); // forward declaration
+
 int main() {
-    std::cout << "[INFO] CS2 Radar Scanner Starting...\n";
+    std::cout << "[INFO] CS2 Radar + Sound ESP + Rotation + FOV Starting...\n";
+
+    std::thread radarThread(RunRadarWindow);
+    radarThread.detach();
 
     while (true) {
         DWORD pid = GetProcessIdByName(L"cs2.exe");
         if (!pid) {
-            std::cout << "[WAIT] CS2 not running. Rechecking in 1s...\r";
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
         }
 
         HANDLE hProc = OpenProcess(PROCESS_VM_READ, FALSE, pid);
         if (!hProc) {
-            std::cout << "[ERROR] Failed to open CS2 process. Retrying...\n";
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
         }
 
         uintptr_t clientBase = GetModuleBaseAddress(pid, L"client.dll");
         if (!clientBase) {
-            std::cout << "[ERROR] Failed to get client.dll base. Retrying...\n";
             CloseHandle(hProc);
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
@@ -103,7 +122,6 @@ int main() {
             uint32_t localPawnHandle;
             if (!ReadProcessMemory(hProc, (void*)(localController + m_hPlayerPawn), &localPawnHandle, sizeof(localPawnHandle), nullptr)
                 || localPawnHandle == 0 || localPawnHandle == 0xFFFFFFFF) {
-                std::cout << "[WAIT] Not spawned. Waiting...\r";
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 continue;
             }
@@ -115,7 +133,18 @@ int main() {
             ReadProcessMemory(hProc, (void*)(localPawn + m_iTeamNum), &localTeam, sizeof(localTeam), nullptr);
             if (localTeam < 2 || localTeam > 3) break;
 
-            std::vector<Vector3> enemyPositions;
+            // Position setzen
+            ReadProcessMemory(hProc, (void*)(localPawn + m_vOldOrigin), &g_localPos, sizeof(g_localPos), nullptr);
+
+            // Blickwinkel setzen
+            struct QAngle { float pitch, yaw, roll; };
+            QAngle eyeAngles{};
+            ReadProcessMemory(hProc, (void*)(localPawn + m_angEyeAngles), &eyeAngles, sizeof(eyeAngles), nullptr);
+            g_viewYaw = eyeAngles.yaw;
+
+            // Gegner sammeln
+            g_enemyPositions.clear();
+            float closestDist = FLT_MAX;
 
             for (int i = 0; i < 1024; i++) {
                 uintptr_t entryBase = entityList + 0x8 * (i >> 9) + 0x10;
@@ -133,28 +162,28 @@ int main() {
                 ReadProcessMemory(hProc, (void*)(pawn + m_iTeamNum), &team, sizeof(team), nullptr);
                 ReadProcessMemory(hProc, (void*)(pawn + m_iHealth), &health, sizeof(health), nullptr);
 
-                if (team != 2 && team != 3) continue;
-                if (team == localTeam) continue;
-                if (health <= 0 || health > 100) continue;
+                if (team != 2 && team != 3 || team == localTeam || health <= 0 || health > 100) continue;
 
                 Vector3 pos{};
                 if (ReadProcessMemory(hProc, (void*)(pawn + m_vOldOrigin), &pos, sizeof(pos), nullptr)) {
                     if (IsValidPosition(pos)) {
-                        enemyPositions.push_back(pos);
+                        g_enemyPositions.push_back(pos);
+                        float dist = Distance(g_localPos, pos);
+                        if (dist < closestDist) closestDist = dist;
                     }
                 }
             }
 
-            std::cout << std::fixed << std::setprecision(1);
-            std::cout << "\rEnemies: " << enemyPositions.size() << "   ";
-            for (const auto& p : enemyPositions) {
-                std::cout << "| (" << p.x << "," << p.y << ") ";
-            }
+            // Sound-ESP
+            int intensity = MapDistanceToIntensity(closestDist);
+            int freq = 400 + (intensity * 3);
+            if (intensity > 0) Beep(freq, 100);
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            int delay = 2000 - (intensity * 18);
+            delay = std::clamp(delay, 200, 2000);
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         }
 
-        std::cout << "\n[INFO] Left match. Waiting to reconnect...\n";
         CloseHandle(hProc);
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
